@@ -8,6 +8,10 @@ import (
 	"encoding/pem"
 	"math/big"
 	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/fatedier/frp/pkg/util/log"
 )
 
 func newCustomTLSKeyPair(certfile, keyfile string) (*tls.Certificate, error) {
@@ -16,6 +20,29 @@ func newCustomTLSKeyPair(certfile, keyfile string) (*tls.Certificate, error) {
 		return nil, err
 	}
 	return &tlsCert, nil
+}
+
+func newCustomTLSKeyPairReloader(certPath, keyPath string) (*keypairReloader, error) {
+	result := &keypairReloader{
+		certPath: certPath,
+		keyPath:  keyPath,
+	}
+	cert, err := newCustomTLSKeyPair(certPath, keyPath)
+	if err != nil {
+		return nil, err
+	}
+	result.cert = cert
+	go func() {
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, syscall.SIGHUP)
+		for range c {
+			log.Info("Received SIGHUP, reloading TLS certificate and key from %q and %q", certPath, keyPath)
+			if err := result.maybeReload(); err != nil {
+				log.Info("Keeping old TLS certificate because the new one could not be loaded: %v", err)
+			}
+		}
+	}()
+	return result, nil
 }
 
 func newRandomTLSKeyPair() *tls.Certificate {
@@ -65,12 +92,12 @@ func NewServerTLSConfig(certPath, keyPath, caPath string) (*tls.Config, error) {
 		cert := newRandomTLSKeyPair()
 		base.Certificates = []tls.Certificate{*cert}
 	} else {
-		cert, err := newCustomTLSKeyPair(certPath, keyPath)
+		kpr, err := newCustomTLSKeyPairReloader(certPath, keyPath)
 		if err != nil {
 			return nil, err
 		}
 
-		base.Certificates = []tls.Certificate{*cert}
+		base.GetCertificate = kpr.GetCertificateFunc()
 	}
 
 	if caPath != "" {
